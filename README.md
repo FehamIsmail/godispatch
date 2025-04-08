@@ -85,6 +85,43 @@ Example configuration file:
 go run main.go
 ```
 
+### Frontend Dashboard
+
+The system includes a web-based dashboard built with Svelte for monitoring and managing jobs.
+
+#### Dashboard Setup
+
+1. Navigate to the dashboard directory:
+```bash
+cd dashboard
+```
+
+2. Install dependencies:
+```bash
+npm install
+# or
+yarn install
+# or
+pnpm install
+```
+
+3. Start the development server:
+```bash
+npm run dev
+# or start the server and open the app in a new browser tab
+npm run dev -- --open
+```
+
+4. For production build:
+```bash
+npm run build
+```
+
+5. Preview the production build:
+```bash
+npm run preview
+```
+
 ## API Usage
 
 ### Creating a Task

@@ -1,2 +1,19 @@
-
+# Binary files
 temp.exe
+
+# Frontend (dashboard)
+dashboard/node_modules
+dashboard/.output
+dashboard/.vercel
+dashboard/.netlify
+dashboard/.wrangler
+dashboard/.svelte-kit
+dashboard/build
+.DS_Store
+Thumbs.db
+dashboard/.env
+dashboard/.env.*
+!dashboard/.env.example
+!dashboard/.env.test
+dashboard/vite.config.js.timestamp-*
+dashboard/vite.config.ts.timestamp-*
