@@ -179,8 +179,10 @@ func (s *Scheduler) checkSchedules(ctx context.Context) {
 		}
 
 		if isDue(schedule, now) {
-			// Create a copy of the task to avoid race conditions
+
 			taskCopy := *task
+			scheduleCopy := *schedule
+			taskIDCopy := taskID
 
 			go func() {
 				// Using a separate context to avoid cancellation
@@ -191,22 +193,22 @@ func (s *Scheduler) checkSchedules(ctx context.Context) {
 				}
 
 				// For recurring tasks, update the next execution time
-				if schedule.Type == ScheduleRecurring || schedule.Type == ScheduleCron {
+				if scheduleCopy.Type == ScheduleRecurring || scheduleCopy.Type == ScheduleCron {
 					s.mu.Lock()
 					defer s.mu.Unlock()
 
 					// The task might have been cancelled while we were enqueueing
-					currentTask, exists := s.tasks[taskID]
+					currentTask, exists := s.tasks[taskIDCopy]
 					if exists && currentTask.Status == StatusScheduled {
 						// Keep it scheduled for next execution
 						// For recurring tasks with intervals, simply leave as is
 						// For cron tasks, we don't need to update anything as the expression determines the schedule
 					}
-				} else if schedule.Type == ScheduleOneTime {
+				} else if scheduleCopy.Type == ScheduleOneTime {
 					// One-time task should be removed from schedules
 					s.mu.Lock()
 					defer s.mu.Unlock()
-					delete(s.schedules, taskID)
+					delete(s.schedules, taskIDCopy)
 				}
 			}()
 		}
