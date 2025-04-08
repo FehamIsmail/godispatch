@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"godispatch/dispatcher/config"
-	"godispatch/dispatcher/task"
+	"GoDispatch/dispatcher/config"
+	"GoDispatch/dispatcher/task"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"

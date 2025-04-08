@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"godispatch/dispatcher/api"
-	"godispatch/dispatcher/config"
-	"godispatch/dispatcher/controller"
+	"GoDispatch/dispatcher/api"
+	"GoDispatch/dispatcher/config"
+	"GoDispatch/dispatcher/controller"
 )
 
 func main() {

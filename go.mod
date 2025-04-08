@@ -1,4 +1,4 @@
-module godispatch
+module GoDispatch
 
 go 1.20
 

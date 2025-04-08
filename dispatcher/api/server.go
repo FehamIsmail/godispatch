@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
-	"godispatch/dispatcher/config"
-	"godispatch/dispatcher/controller"
-	"godispatch/dispatcher/task"
+	"GoDispatch/dispatcher/config"
+	"GoDispatch/dispatcher/controller"
+	"GoDispatch/dispatcher/task"
 
 	"encoding/json"
 

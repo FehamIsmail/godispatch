@@ -31,8 +31,8 @@ The system consists of several components:
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/godispatch.git
-cd godispatch
+git clone https://github.com/yourusername/GoDispatch.git
+cd GoDispatch
 go mod tidy
 ```
 

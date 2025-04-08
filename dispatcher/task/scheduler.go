@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"godispatch/dispatcher/config"
+	"GoDispatch/dispatcher/config"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorhill/cronexpr"

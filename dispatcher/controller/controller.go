@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"godispatch/dispatcher/config"
-	"godispatch/dispatcher/task"
-	"godispatch/dispatcher/worker"
+	"GoDispatch/dispatcher/config"
+	"GoDispatch/dispatcher/task"
+	"GoDispatch/dispatcher/worker"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
