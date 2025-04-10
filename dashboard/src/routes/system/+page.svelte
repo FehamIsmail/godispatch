@@ -1,65 +1,68 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { api } from '$lib/api';
-    import type { SystemMetrics, Task } from '$lib/types';
+    import type { SystemMetrics, Worker } from '$lib/types';
     import Table from '$lib/components/Table.svelte';
 
     let metrics: SystemMetrics | null = null;
-    let recentTasks: Task[] = [];
+    let workers: Worker[] = [];
     let loading = true;
     let error: string | null = null;
 
-    // Define table columns for recent tasks
-    const taskColumns = [
-        { key: 'name', label: 'Name' },
-        { key: 'type', label: 'Type' },
+    // Define table columns for workers
+    const workerColumns = [
+        { key: 'id', label: 'ID' },
         { key: 'status', label: 'Status' },
-        { key: 'created_at', label: 'Created' }
+        { key: 'current_task', label: 'Current Task' },
+        { key: 'last_heartbeat', label: 'Last Heartbeat' }
     ];
 
     // Define custom cell renderers
-    const taskCellRenderers = {
-        name: (value: string, row: Task) => ({
-            html: `<a href="/tasks/${row.id}" class="text-indigo-600 hover:text-indigo-900">${value}</a>`
-        }),
+    const workerCellRenderers = {
         status: (value: string) => ({
             html: `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
-                ${value === 'completed' ? 'bg-green-100 text-green-800' :
-                 value === 'running' ? 'bg-blue-100 text-blue-800' :
-                 value === 'failed' ? 'bg-red-100 text-red-800' :
-                 value === 'cancelled' ? 'bg-gray-100 text-gray-800' :
+                ${value === 'active' ? 'bg-green-100 text-green-800' :
+                 value === 'idle' ? 'bg-gray-100 text-gray-800' :
                  'bg-yellow-100 text-yellow-800'}">
                 ${value}
             </span>`
         }),
-        created_at: (value: string) => new Date(value).toLocaleString()
+        current_task: (value: string | null) => {
+            if (value) {
+                return {
+                    html: `<a href="/tasks/${value}" class="text-indigo-600 hover:text-indigo-900">${value}</a>`
+                };
+            }
+            return '-';
+        },
+        last_heartbeat: (value: string) => new Date(value).toLocaleString()
     };
 
-    async function loadData() {
+    async function loadSystemData() {
         try {
             loading = true;
-            const [metricsResponse, tasksResponse] = await Promise.all([
+            const [metricsResponse, workersResponse] = await Promise.all([
                 api.getSystemMetrics(),
-                api.listTasks(undefined, 5)
+                api.getWorkers()
             ]);
             metrics = metricsResponse;
-            recentTasks = tasksResponse.tasks;
+            workers = workersResponse.workers;
         } catch (e) {
-            error = e instanceof Error ? e.message : 'Failed to load dashboard data';
+            error = e instanceof Error ? e.message : 'Failed to load system data';
         } finally {
             loading = false;
         }
     }
 
     onMount(() => {
-        loadData();
-        const interval = setInterval(loadData, 5000);
+        loadSystemData();
+        const interval = setInterval(loadSystemData, 5000);
         return () => clearInterval(interval);
     });
 </script>
 
 <div class="space-y-6">
-    <h1 class="text-2xl font-semibold text-gray-900">Dashboard</h1>
+    <h1 class="text-2xl font-semibold text-gray-900">System Overview</h1>
 
     {#if error}
         <div class="bg-red-50 border-l-4 border-red-400 p-4">
@@ -156,11 +159,11 @@
         </div>
 
         <Table
-            title="Recent Tasks"
-            columns={taskColumns}
-            rows={recentTasks}
-            cellRenderers={taskCellRenderers}
+            title="Workers"
+            columns={workerColumns}
+            rows={workers}
+            cellRenderers={workerCellRenderers}
             loading={loading}
         />
     {/if}
-</div>
+</div> 
