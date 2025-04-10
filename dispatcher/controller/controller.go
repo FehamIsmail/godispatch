@@ -39,6 +39,29 @@ type Schedule struct {
 	TimeZone   string    `json:"time_zone,omitempty"`
 }
 
+// TaskStats represents statistics about tasks
+type TaskStats struct {
+	TotalTasks     int `json:"total_tasks"`
+	ActiveTasks    int `json:"active_tasks"`
+	CompletedTasks int `json:"completed_tasks"`
+	FailedTasks    int `json:"failed_tasks"`
+}
+
+// WorkerStats represents statistics about workers
+type WorkerStats struct {
+	ActiveWorkers     int           `json:"active_workers"`
+	IdleWorkers       int           `json:"idle_workers"`
+	AvgProcessingTime time.Duration `json:"avg_processing_time"`
+}
+
+// WorkerInfo holds information about a worker
+type WorkerInfo struct {
+	ID            string    `json:"id"`
+	Status        string    `json:"status"`
+	CurrentTask   string    `json:"current_task,omitempty"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+}
+
 // Controller coordinates between scheduler and workers
 type Controller struct {
 	id          string
@@ -48,6 +71,7 @@ type Controller struct {
 	redisClient *redis.Client
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
+	startTime   time.Time
 }
 
 // New creates a new controller
@@ -73,6 +97,7 @@ func New(cfg *config.Config) (*Controller, error) {
 		config:      cfg,
 		redisClient: redisClient,
 		stopCh:      make(chan struct{}),
+		startTime:   time.Now(),
 	}
 
 	// Create scheduler
@@ -424,4 +449,121 @@ func (c *Controller) performHealthCheck(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// GetTasksStats returns statistics about tasks
+func (c *Controller) GetTasksStats(ctx context.Context) (*TaskStats, error) {
+	// Get task counts by status from Redis
+	stats := &TaskStats{
+		TotalTasks:     0,
+		ActiveTasks:    0,
+		CompletedTasks: 0,
+		FailedTasks:    0,
+	}
+
+	// Get task counts by status
+	pendingCount, err := c.redisClient.ZCard(ctx, "queue:tasks:pending").Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	stats.ActiveTasks += int(pendingCount)
+
+	runningCount, err := c.redisClient.ZCard(ctx, "queue:tasks:running").Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	stats.ActiveTasks += int(runningCount)
+
+	// Count completed tasks
+	completedCount, err := c.redisClient.ZCard(ctx, "queue:tasks:completed").Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	stats.CompletedTasks = int(completedCount)
+
+	// Count failed tasks
+	failedCount, err := c.redisClient.ZCard(ctx, "queue:tasks:failed").Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	stats.FailedTasks = int(failedCount)
+
+	// Total tasks is the sum of all tasks
+	stats.TotalTasks = stats.ActiveTasks + stats.CompletedTasks + stats.FailedTasks
+
+	return stats, nil
+}
+
+// GetWorkersStats returns statistics about workers
+func (c *Controller) GetWorkersStats(ctx context.Context) (*WorkerStats, error) {
+	// Collect stats from all workers
+	stats := &WorkerStats{
+		ActiveWorkers:     0,
+		IdleWorkers:       0,
+		AvgProcessingTime: 0,
+	}
+
+	totalProcessingTime := time.Duration(0)
+	processedTasks := 0
+
+	// Count active and idle workers
+	for _, w := range c.workers {
+		// Check if worker has active jobs
+		if w.GetMetrics().GetStats().ActiveTasks > 0 {
+			stats.ActiveWorkers++
+		} else {
+			stats.IdleWorkers++
+		}
+
+		// Get worker metrics
+		workerMetrics := w.GetMetrics().GetStats()
+		totalProcessingTime += workerMetrics.AvgProcessingTime * time.Duration(workerMetrics.CompletedTasks)
+		processedTasks += workerMetrics.CompletedTasks
+	}
+
+	// Calculate average processing time
+	if processedTasks > 0 {
+		stats.AvgProcessingTime = totalProcessingTime / time.Duration(processedTasks)
+	}
+
+	return stats, nil
+}
+
+// GetStartTime returns the time when the controller was started
+func (c *Controller) GetStartTime() time.Time {
+	return c.startTime
+}
+
+// GetWorkers returns information about all workers
+func (c *Controller) GetWorkers(ctx context.Context) ([]WorkerInfo, error) {
+	var workers []WorkerInfo
+
+	for _, w := range c.workers {
+		metrics := w.GetMetrics().GetStats()
+
+		status := "idle"
+		var currentTask string
+
+		if metrics.ActiveTasks > 0 {
+			status = "active"
+
+			// Try to get the current task ID from Redis
+			// This is a simplification - in a real system you'd track this more precisely
+			result, err := c.redisClient.HGet(ctx, fmt.Sprintf("worker:%s", w.GetID()), "current_task").Result()
+			if err == nil && result != "" {
+				currentTask = result
+			}
+		}
+
+		workerInfo := WorkerInfo{
+			ID:            w.GetID(),
+			Status:        status,
+			CurrentTask:   currentTask,
+			LastHeartbeat: time.Now(), // Simplification - would come from a real heartbeat mechanism
+		}
+
+		workers = append(workers, workerInfo)
+	}
+
+	return workers, nil
 }

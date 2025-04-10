@@ -336,3 +336,13 @@ func (w *Worker) reportMetrics(ctx context.Context) {
 		}
 	}
 }
+
+// GetMetrics returns the worker's metrics
+func (w *Worker) GetMetrics() *MetricsCollector {
+	return w.metrics
+}
+
+// GetID returns the worker's ID
+func (w *Worker) GetID() string {
+	return w.id
+}

@@ -9,6 +9,8 @@ import (
 type Task struct {
 	ID              string     `json:"id"`
 	Type            string     `json:"type"`
+	Name            string     `json:"name"`
+	Description     string     `json:"description"`
 	Payload         []byte     `json:"payload"`
 	Status          Status     `json:"status"`
 	Priority        int        `json:"priority"`
