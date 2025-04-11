@@ -85,6 +85,8 @@ func (s *Scheduler) ScheduleTask(ctx context.Context, task *Task, schedule *Sche
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Printf("Scheduling task: ID=%s, Type=%s, Name=%s, Status=%s", task.ID, task.Type, task.Name, task.Status)
+
 	// Validate task and schedule
 	if task.ID == "" {
 		return fmt.Errorf("task ID cannot be empty")
@@ -102,20 +104,25 @@ func (s *Scheduler) ScheduleTask(ctx context.Context, task *Task, schedule *Sche
 	task.Status = StatusScheduled
 	task.UpdatedAt = time.Now()
 
+	log.Printf("Setting task status to 'scheduled': ID=%s", task.ID)
+
 	// Store task and schedule in memory
 	s.tasks[task.ID] = task
 	s.schedules[task.ID] = schedule
 
 	// Store in Redis for persistence
 	if err := s.saveTaskAndSchedule(ctx, task, schedule); err != nil {
+		log.Printf("Failed to save task and schedule: %v", err)
 		return fmt.Errorf("failed to save task and schedule: %w", err)
 	}
 
 	// If the task is scheduled to run now, enqueue it
 	if shouldRunNow(schedule) {
+		log.Printf("Task scheduled to run immediately: ID=%s", task.ID)
 		return s.enqueueTask(ctx, task)
 	}
 
+	log.Printf("Task scheduled successfully: ID=%s", task.ID)
 	return nil
 }
 
@@ -124,18 +131,42 @@ func (s *Scheduler) CancelTask(ctx context.Context, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// First, try to get the task from our in-memory map
 	task, exists := s.tasks[taskID]
+
+	// If not in memory, try to get it from Redis
 	if !exists {
-		return fmt.Errorf("task not found: %s", taskID)
+		// Check Redis for the task
+		key := fmt.Sprintf("task:%s", taskID)
+		taskJSON, err := s.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			if err == redis.Nil {
+				return fmt.Errorf("task not found: %s", taskID)
+			}
+			return fmt.Errorf("failed to fetch task from Redis: %w", err)
+		}
+
+		// Parse the task
+		parsedTask, parseErr := TaskFromJSON([]byte(taskJSON))
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse task: %w", parseErr)
+		}
+
+		// Add to our in-memory map for cancellation
+		task = parsedTask
+		s.tasks[taskID] = task
 	}
 
-	// Only cancel if the task is not already running or completed
-	if task.Status != StatusScheduled && task.Status != StatusPending && task.Status != StatusRetrying {
+	// Only allow cancellation of tasks that are not already completed, failed, or cancelled
+	if task.Status == StatusCompleted || task.Status == StatusFailed || task.Status == StatusCancelled {
 		return fmt.Errorf("cannot cancel task with status: %s", task.Status)
 	}
 
+	// Update the task status
 	task.Status = StatusCancelled
 	task.UpdatedAt = time.Now()
+
+	log.Printf("Cancelling task %s, previous status: %s", taskID, task.Status)
 
 	// Update in Redis
 	if err := s.saveTask(ctx, task); err != nil {
@@ -144,6 +175,41 @@ func (s *Scheduler) CancelTask(ctx context.Context, taskID string) error {
 
 	// Remove from schedules
 	delete(s.schedules, taskID)
+
+	// If task is in a queue, remove it
+	if err := s.removeTaskFromQueues(ctx, task); err != nil {
+		log.Printf("Failed to remove task from queues: %v", err)
+		// Don't return error as we've already updated the task status
+	}
+
+	return nil
+}
+
+// removeTaskFromQueues removes a task from all queues
+func (s *Scheduler) removeTaskFromQueues(ctx context.Context, task *Task) error {
+	// Try to remove from type-specific queue
+	queueKey := fmt.Sprintf("queue:tasks:%s", task.Type)
+	taskJSON, err := task.ToJSON()
+	if err != nil {
+		return fmt.Errorf("failed to serialize task: %w", err)
+	}
+
+	_, err = s.redisClient.ZRem(ctx, queueKey, taskJSON).Result()
+	if err != nil {
+		log.Printf("Error removing task from type queue: %v", err)
+	}
+
+	// Also try to remove from all_pending queue
+	_, err = s.redisClient.ZRem(ctx, "queue:tasks:all_pending", taskJSON).Result()
+	if err != nil {
+		log.Printf("Error removing task from all_pending queue: %v", err)
+	}
+
+	// Remove from pending tasks set
+	_, err = s.redisClient.SRem(ctx, "set:pending_tasks", task.ID).Result()
+	if err != nil {
+		log.Printf("Error removing task from pending set: %v", err)
+	}
 
 	return nil
 }
@@ -174,12 +240,21 @@ func (s *Scheduler) checkSchedules(ctx context.Context) {
 
 	for taskID, schedule := range s.schedules {
 		task := s.tasks[taskID]
-		if task == nil || task.Status != StatusScheduled {
+		if task == nil {
 			continue
 		}
 
-		if isDue(schedule, now) {
+		// Allow both scheduled tasks and retrying tasks to be processed
+		if task.Status != StatusScheduled && task.Status != StatusRetrying {
+			continue
+		}
 
+		// For retrying tasks, check if it's time to retry based on NextRetryAt
+		if task.Status == StatusRetrying && task.NextRetryAt.After(now) {
+			continue // Not yet time to retry
+		}
+
+		if isDue(schedule, now) || task.Status == StatusRetrying {
 			taskCopy := *task
 			scheduleCopy := *schedule
 			taskIDCopy := taskID
@@ -236,17 +311,49 @@ func (s *Scheduler) enqueueTask(ctx context.Context, task *Task) error {
 		return fmt.Errorf("failed to serialize task: %w", err)
 	}
 
-	// Add to a sorted set
-	if err := s.redisClient.ZAdd(ctx, queueKey, &redis.Z{
+	// Log task being enqueued
+	log.Printf("Enqueueing task: ID=%s, Type=%s, Queue=%s", task.ID, task.Type, queueKey)
+
+	// First check if the task already exists in the queue to avoid duplicates
+	count, err := s.redisClient.ZScore(ctx, queueKey, string(taskJSON)).Result()
+	if err != nil && err != redis.Nil {
+		log.Printf("Error checking if task exists in queue: %v", err)
+	}
+
+	if count > 0 {
+		log.Printf("Task %s already exists in queue %s, skipping enqueue", task.ID, queueKey)
+	} else {
+		// Add to a sorted set
+		if err := s.redisClient.ZAdd(ctx, queueKey, &redis.Z{
+			Score:  score,
+			Member: taskJSON,
+		}).Err(); err != nil {
+			log.Printf("Failed to add task %s to queue %s: %v", task.ID, queueKey, err)
+			return fmt.Errorf("failed to add task to queue: %w", err)
+		}
+		log.Printf("Successfully added task %s to queue %s", task.ID, queueKey)
+	}
+
+	// Also add to a backup queue with all pending tasks, regardless of type
+	backupQueueKey := "queue:tasks:all_pending"
+	if err := s.redisClient.ZAdd(ctx, backupQueueKey, &redis.Z{
 		Score:  score,
 		Member: taskJSON,
 	}).Err(); err != nil {
-		return fmt.Errorf("failed to add task to queue: %w", err)
+		log.Printf("Failed to add task %s to backup queue: %v", task.ID, err)
+		// Don't return error here, as the task is already in the main queue
 	}
 
 	// Update the task in storage
 	if err := s.saveTask(ctx, task); err != nil {
 		return fmt.Errorf("failed to save task: %w", err)
+	}
+
+	// Also save a reference to the pending task in a set for easier scanning
+	pendingSetKey := "set:pending_tasks"
+	if err := s.redisClient.SAdd(ctx, pendingSetKey, task.ID).Err(); err != nil {
+		log.Printf("Failed to add task ID to pending set: %v", err)
+		// Don't return error here as it's just for optimization
 	}
 
 	return nil
@@ -269,13 +376,20 @@ func (s *Scheduler) saveTaskAndSchedule(ctx context.Context, task *Task, schedul
 		return err
 	}
 
+	log.Printf("Saved task to Redis: key=task:%s", task.ID)
+
 	scheduleJSON, err := serializeSchedule(schedule)
 	if err != nil {
 		return err
 	}
 
 	key := fmt.Sprintf("schedule:%s", task.ID)
-	return s.redisClient.Set(ctx, key, scheduleJSON, 0).Err()
+	if err := s.redisClient.Set(ctx, key, scheduleJSON, 0).Err(); err != nil {
+		return err
+	}
+
+	log.Printf("Saved schedule to Redis: key=%s", key)
+	return nil
 }
 
 // loadTasks loads tasks and schedules from Redis

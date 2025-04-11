@@ -4,7 +4,7 @@ export interface Task {
     name: string;
     description: string;
     priority: 'low' | 'medium' | 'high';
-    status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+    status: 'pending' | 'scheduled' | 'running' | 'completed' | 'failed' | 'cancelled' | 'retrying' | 'timeout';
     payload: Record<string, any>;
     max_retries: number;
     timeout: number;

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,44 +251,35 @@ func (c *Controller) CancelTask(ctx context.Context, taskID string) error {
 }
 
 // ListTasks lists tasks with optional filters
-func (c *Controller) ListTasks(ctx context.Context, status task.Status, limit, offset int) ([]*task.Task, error) {
-	var pattern string
-	if status == "" {
-		pattern = "task:*"
-	} else {
-		// This is not efficient for large datasets, but works for demo
-		// In production, you'd use a secondary index
-		pattern = "task:*"
-	}
-
+func (c *Controller) ListTasks(ctx context.Context, status task.Status, limit, offset int, sortBy string, sortOrder string) ([]*task.Task, error) {
+	// Get all task keys (improvement: use SCAN for large datasets)
+	pattern := "task:*"
 	keys, err := c.redisClient.Keys(ctx, pattern).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks: %w", err)
 	}
 
-	// Apply pagination
-	if offset >= len(keys) {
-		return []*task.Task{}, nil
+	// Use Redis MGET to get multiple tasks at once
+	results, err := c.redisClient.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tasks: %w", err)
 	}
 
-	end := offset + limit
-	if end > len(keys) {
-		end = len(keys)
-	}
-
-	keys = keys[offset:end]
-
+	// Parse all tasks first
 	var tasks []*task.Task
-	for _, key := range keys {
-		result, err := c.redisClient.Get(ctx, key).Result()
-		if err != nil {
-			log.Printf("Failed to get task %s: %v", key, err)
+	for _, result := range results {
+		if result == nil {
 			continue
 		}
 
-		task, err := task.TaskFromJSON([]byte(result))
+		taskStr, ok := result.(string)
+		if !ok {
+			continue
+		}
+
+		task, err := task.TaskFromJSON([]byte(taskStr))
 		if err != nil {
-			log.Printf("Failed to parse task %s: %v", key, err)
+			log.Printf("Failed to parse task: %v", err)
 			continue
 		}
 
@@ -297,7 +291,58 @@ func (c *Controller) ListTasks(ctx context.Context, status task.Status, limit, o
 		tasks = append(tasks, task)
 	}
 
-	return tasks, nil
+	// Sort the tasks based on sortBy and sortOrder parameters
+	sortTasks(tasks, sortBy, sortOrder)
+
+	// Apply pagination
+	if offset >= len(tasks) {
+		return []*task.Task{}, nil
+	}
+
+	end := offset + limit
+	if end > len(tasks) {
+		end = len(tasks)
+	}
+
+	// Return the paginated subset
+	return tasks[offset:end], nil
+}
+
+// sortTasks sorts tasks based on specified field and order
+func sortTasks(tasks []*task.Task, sortBy string, sortOrder string) {
+	sort.Slice(tasks, func(i, j int) bool {
+		// Handle different sort fields
+		switch sortBy {
+		case "created_at":
+			if sortOrder == "asc" {
+				return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+			}
+			return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
+		case "updated_at":
+			if sortOrder == "asc" {
+				return tasks[i].UpdatedAt.Before(tasks[j].UpdatedAt)
+			}
+			return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
+		case "name":
+			if sortOrder == "asc" {
+				return tasks[i].Name < tasks[j].Name
+			}
+			return tasks[i].Name > tasks[j].Name
+		case "status":
+			if sortOrder == "asc" {
+				return string(tasks[i].Status) < string(tasks[j].Status)
+			}
+			return string(tasks[i].Status) > string(tasks[j].Status)
+		case "priority":
+			if sortOrder == "asc" {
+				return tasks[i].Priority < tasks[j].Priority
+			}
+			return tasks[i].Priority > tasks[j].Priority
+		default:
+			// Default to sort by creation date, newest first
+			return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
+		}
+	})
 }
 
 // healthCheckLoop performs periodic health checks
@@ -362,54 +407,10 @@ func (c *Controller) performHealthCheck(ctx context.Context) {
 		// Check if task is running on an inactive worker
 		if task.Status == "running" && task.WorkerID != "" {
 			if !activeWorkers[task.WorkerID] {
-				// Worker is dead, mark task as failed
-				log.Printf("Worker %s appears to be dead, marking task %s as failed", task.WorkerID, task.ID)
+				// Worker is dead, mark task as failed or retry
+				log.Printf("Worker %s appears to be dead, handling task %s", task.WorkerID, task.ID)
 
-				task.Status = "failed"
-				task.UpdatedAt = time.Now()
-
-				taskJSON, err := task.ToJSON()
-				if err != nil {
-					log.Printf("Failed to serialize task %s: %v", task.ID, err)
-					continue
-				}
-
-				if err := c.redisClient.Set(ctx, key, taskJSON, 0).Err(); err != nil {
-					log.Printf("Failed to update task %s: %v", task.ID, err)
-					continue
-				}
-
-				// Create a failure result
-				result := &Result{
-					TaskID:     task.ID,
-					Status:     "failed",
-					Error:      "Worker died during execution",
-					StartTime:  task.UpdatedAt,
-					EndTime:    time.Now(),
-					RetryCount: task.RetryCount,
-					WorkerID:   task.WorkerID,
-				}
-
-				resultJSON, err := json.Marshal(result)
-				if err != nil {
-					log.Printf("Failed to serialize result for task %s: %v", task.ID, err)
-					continue
-				}
-
-				resultKey := fmt.Sprintf("result:%s", task.ID)
-				if err := c.redisClient.Set(ctx, resultKey, resultJSON, 24*time.Hour).Err(); err != nil {
-					log.Printf("Failed to save result for task %s: %v", task.ID, err)
-					continue
-				}
-
-				// Add to history
-				historyKey := fmt.Sprintf("history:%s", task.ID)
-				if err := c.redisClient.LPush(ctx, historyKey, resultJSON).Err(); err != nil {
-					log.Printf("Failed to add to history for task %s: %v", task.ID, err)
-					continue
-				}
-
-				// Schedule retry if needed
+				// Check if we should retry
 				if task.RetryCount < task.MaxRetries {
 					task.RetryCount++
 					task.Status = "retrying"
@@ -417,13 +418,16 @@ func (c *Controller) performHealthCheck(ctx context.Context) {
 					task.WorkerID = ""
 					task.UpdatedAt = time.Now()
 
-					retryTaskJSON, err := task.ToJSON()
+					log.Printf("Task %s will be retried (%d/%d) after dead worker",
+						task.ID, task.RetryCount, task.MaxRetries)
+
+					taskJSON, err := task.ToJSON()
 					if err != nil {
 						log.Printf("Failed to serialize retry task %s: %v", task.ID, err)
 						continue
 					}
 
-					if err := c.redisClient.Set(ctx, key, retryTaskJSON, 0).Err(); err != nil {
+					if err := c.redisClient.Set(ctx, key, taskJSON, 0).Err(); err != nil {
 						log.Printf("Failed to update retry task %s: %v", task.ID, err)
 						continue
 					}
@@ -445,6 +449,124 @@ func (c *Controller) performHealthCheck(ctx context.Context) {
 						log.Printf("Failed to save schedule for retry task %s: %v", task.ID, err)
 						continue
 					}
+
+					// Create a result indicating retry
+					result := &Result{
+						TaskID: task.ID,
+						Status: "retrying",
+						Error: fmt.Sprintf("Worker %s died during execution (will retry %d/%d)",
+							task.WorkerID, task.RetryCount, task.MaxRetries),
+						StartTime:  task.UpdatedAt,
+						EndTime:    time.Now(),
+						RetryCount: task.RetryCount,
+						WorkerID:   task.WorkerID,
+					}
+
+					resultJSON, err := json.Marshal(result)
+					if err != nil {
+						log.Printf("Failed to serialize result for task %s: %v", task.ID, err)
+						continue
+					}
+
+					// Add to history
+					historyKey := fmt.Sprintf("history:%s", task.ID)
+					if err := c.redisClient.LPush(ctx, historyKey, resultJSON).Err(); err != nil {
+						log.Printf("Failed to add to history for task %s: %v", task.ID, err)
+						continue
+					}
+				} else {
+					// No more retries, mark as failed
+					task.Status = "failed"
+					task.UpdatedAt = time.Now()
+
+					taskJSON, err := task.ToJSON()
+					if err != nil {
+						log.Printf("Failed to serialize task %s: %v", task.ID, err)
+						continue
+					}
+
+					if err := c.redisClient.Set(ctx, key, taskJSON, 0).Err(); err != nil {
+						log.Printf("Failed to update task %s: %v", task.ID, err)
+						continue
+					}
+
+					// Create a failure result
+					result := &Result{
+						TaskID:     task.ID,
+						Status:     "failed",
+						Error:      "Worker died during execution and max retries exceeded",
+						StartTime:  task.UpdatedAt,
+						EndTime:    time.Now(),
+						RetryCount: task.RetryCount,
+						WorkerID:   task.WorkerID,
+					}
+
+					resultJSON, err := json.Marshal(result)
+					if err != nil {
+						log.Printf("Failed to serialize result for task %s: %v", task.ID, err)
+						continue
+					}
+
+					resultKey := fmt.Sprintf("result:%s", task.ID)
+					if err := c.redisClient.Set(ctx, resultKey, resultJSON, 24*time.Hour).Err(); err != nil {
+						log.Printf("Failed to save result for task %s: %v", task.ID, err)
+						continue
+					}
+
+					// Add to history
+					historyKey := fmt.Sprintf("history:%s", task.ID)
+					if err := c.redisClient.LPush(ctx, historyKey, resultJSON).Err(); err != nil {
+						log.Printf("Failed to add to history for task %s: %v", task.ID, err)
+						continue
+					}
+				}
+			}
+		}
+
+		// Also check for tasks that have been in 'retrying' state for too long (might be stuck)
+		if task.Status == "retrying" {
+			// Check if NextRetryAt is way in the past (more than 10 minutes)
+			if !task.NextRetryAt.IsZero() && time.Since(task.NextRetryAt) > 10*time.Minute {
+				log.Printf("Task %s has been stuck in retrying state, re-scheduling", task.ID)
+
+				// Re-schedule the task
+				schedule := &Schedule{
+					Type:      "one-time",
+					StartTime: time.Now(),
+				}
+
+				scheduleJSON, err := json.Marshal(schedule)
+				if err != nil {
+					log.Printf("Failed to serialize schedule for stuck task %s: %v", task.ID, err)
+					continue
+				}
+
+				scheduleKey := fmt.Sprintf("schedule:%s", task.ID)
+				if err := c.redisClient.Set(ctx, scheduleKey, scheduleJSON, 0).Err(); err != nil {
+					log.Printf("Failed to save schedule for stuck task %s: %v", task.ID, err)
+					continue
+				}
+
+				// Add to history
+				result := &Result{
+					TaskID:     task.ID,
+					Status:     "retrying",
+					Error:      "Task was stuck in retrying state, re-scheduled",
+					StartTime:  time.Now(),
+					EndTime:    time.Now(),
+					RetryCount: task.RetryCount,
+				}
+
+				resultJSON, err := json.Marshal(result)
+				if err != nil {
+					log.Printf("Failed to serialize result for stuck task %s: %v", task.ID, err)
+					continue
+				}
+
+				historyKey := fmt.Sprintf("history:%s", task.ID)
+				if err := c.redisClient.LPush(ctx, historyKey, resultJSON).Err(); err != nil {
+					log.Printf("Failed to add to history for stuck task %s: %v", task.ID, err)
+					continue
 				}
 			}
 		}
@@ -453,43 +575,93 @@ func (c *Controller) performHealthCheck(ctx context.Context) {
 
 // GetTasksStats returns statistics about tasks
 func (c *Controller) GetTasksStats(ctx context.Context) (*TaskStats, error) {
-	// Get task counts by status from Redis
+	// Debug: list all keys in Redis with detailed logging
+	allKeys, err := c.redisClient.Keys(ctx, "*").Result()
+	if err != nil {
+		log.Printf("Error getting all Redis keys: %v", err)
+	} else {
+		log.Printf("All Redis keys (%d): %v", len(allKeys), allKeys)
+
+		// Group keys by prefix for easier debugging
+		keysByPrefix := make(map[string][]string)
+		for _, key := range allKeys {
+			parts := strings.Split(key, ":")
+			prefix := parts[0]
+			if len(keysByPrefix[prefix]) < 10 { // Limit to 10 examples per prefix
+				keysByPrefix[prefix] = append(keysByPrefix[prefix], key)
+			}
+		}
+
+		// Log keys grouped by prefix
+		for prefix, keys := range keysByPrefix {
+			log.Printf("Keys with prefix '%s' (%d): %v", prefix, len(keys), keys)
+		}
+	}
+
+	// Get task counts by directly using the task keys
+	pattern := "task:*"
+	keys, err := c.redisClient.Keys(ctx, pattern).Result()
+	if err != nil {
+		log.Printf("Error getting task keys: %v", err)
+		return nil, err
+	}
+
+	log.Printf("Found %d task keys with pattern '%s': %v", len(keys), pattern, keys)
+
+	// Initialize stats
 	stats := &TaskStats{
-		TotalTasks:     0,
+		TotalTasks:     len(keys),
 		ActiveTasks:    0,
 		CompletedTasks: 0,
 		FailedTasks:    0,
 	}
 
-	// Get task counts by status
-	pendingCount, err := c.redisClient.ZCard(ctx, "queue:tasks:pending").Result()
-	if err != nil && err != redis.Nil {
+	// If there are no tasks, return early
+	if stats.TotalTasks == 0 {
+		return stats, nil
+	}
+
+	// Use MGET to efficiently get all tasks at once
+	results, err := c.redisClient.MGet(ctx, keys...).Result()
+	if err != nil {
+		log.Printf("Error getting task values: %v", err)
 		return nil, err
 	}
-	stats.ActiveTasks += int(pendingCount)
 
-	runningCount, err := c.redisClient.ZCard(ctx, "queue:tasks:running").Result()
-	if err != nil && err != redis.Nil {
-		return nil, err
+	// Count tasks by status
+	for i, result := range results {
+		if result == nil {
+			log.Printf("Task value is nil for key: %s", keys[i])
+			continue
+		}
+
+		taskStr, ok := result.(string)
+		if !ok {
+			log.Printf("Task value is not a string for key: %s", keys[i])
+			continue
+		}
+
+		// Try to parse the task
+		task, err := task.TaskFromJSON([]byte(taskStr))
+		if err != nil {
+			log.Printf("Failed to parse task for key %s: %v", keys[i], err)
+			log.Printf("Task JSON content: %s", taskStr)
+			continue
+		}
+
+		log.Printf("Task found - ID: %s, Type: %s, Name: %s, Status: %s",
+			task.ID, task.Type, task.Name, task.Status)
+
+		// Count by status
+		status := task.Status
+		if status == "pending" || status == "scheduled" || status == "running" || status == "retrying" {
+			stats.ActiveTasks++
+		} else if status == "completed" {
+			stats.CompletedTasks++
+		} else if status == "failed" || status == "cancelled" || status == "timeout" {
+			stats.FailedTasks++
+		}
 	}
-	stats.ActiveTasks += int(runningCount)
-
-	// Count completed tasks
-	completedCount, err := c.redisClient.ZCard(ctx, "queue:tasks:completed").Result()
-	if err != nil && err != redis.Nil {
-		return nil, err
-	}
-	stats.CompletedTasks = int(completedCount)
-
-	// Count failed tasks
-	failedCount, err := c.redisClient.ZCard(ctx, "queue:tasks:failed").Result()
-	if err != nil && err != redis.Nil {
-		return nil, err
-	}
-	stats.FailedTasks = int(failedCount)
-
-	// Total tasks is the sum of all tasks
-	stats.TotalTasks = stats.ActiveTasks + stats.CompletedTasks + stats.FailedTasks
 
 	return stats, nil
 }
@@ -538,31 +710,79 @@ func (c *Controller) GetStartTime() time.Time {
 func (c *Controller) GetWorkers(ctx context.Context) ([]WorkerInfo, error) {
 	var workers []WorkerInfo
 
-	for _, w := range c.workers {
-		metrics := w.GetMetrics().GetStats()
+	// Get all worker heartbeat keys
+	workerKeys, err := c.redisClient.Keys(ctx, "heartbeat:worker:*").Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worker heartbeats: %w", err)
+	}
 
+	log.Printf("Found %d worker heartbeats", len(workerKeys))
+
+	for _, key := range workerKeys {
+		// Extract worker ID from key
+		workerID := key[17:] // Remove "heartbeat:worker:" prefix
+		log.Printf("Processing worker with ID: %s", workerID)
+
+		// Get worker data
+		workerKey := fmt.Sprintf("worker:%s", workerID)
+		workerData, err := c.redisClient.HGetAll(ctx, workerKey).Result()
+		if err != nil {
+			log.Printf("Failed to get data for worker %s: %v", workerID, err)
+			continue
+		}
+
+		// Default values
 		status := "idle"
 		var currentTask string
+		lastHeartbeat := time.Now()
 
-		if metrics.ActiveTasks > 0 {
-			status = "active"
+		// Get status
+		if s, ok := workerData["status"]; ok {
+			status = s
+		}
 
-			// Try to get the current task ID from Redis
-			// This is a simplification - in a real system you'd track this more precisely
-			result, err := c.redisClient.HGet(ctx, fmt.Sprintf("worker:%s", w.GetID()), "current_task").Result()
-			if err == nil && result != "" {
-				currentTask = result
+		// Get current task
+		if task, ok := workerData["current_task"]; ok && task != "" {
+			currentTask = task
+		}
+
+		// Get last heartbeat
+		if hb, ok := workerData["last_heartbeat"]; ok {
+			timestamp, err := strconv.ParseInt(hb, 10, 64)
+			if err == nil {
+				lastHeartbeat = time.Unix(timestamp, 0)
 			}
 		}
 
+		// Create WorkerInfo
 		workerInfo := WorkerInfo{
-			ID:            w.GetID(),
+			ID:            workerID,
 			Status:        status,
 			CurrentTask:   currentTask,
-			LastHeartbeat: time.Now(), // Simplification - would come from a real heartbeat mechanism
+			LastHeartbeat: lastHeartbeat,
 		}
 
 		workers = append(workers, workerInfo)
+	}
+
+	// If no workers were found, add the in-memory workers as fallback
+	if len(workers) == 0 {
+		for _, w := range c.workers {
+			metrics := w.GetMetrics().GetStats()
+
+			status := "idle"
+			if metrics.ActiveTasks > 0 {
+				status = "active"
+			}
+
+			workerInfo := WorkerInfo{
+				ID:            w.GetID(),
+				Status:        status,
+				LastHeartbeat: time.Now(),
+			}
+
+			workers = append(workers, workerInfo)
+		}
 	}
 
 	return workers, nil

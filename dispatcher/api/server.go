@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -164,6 +165,7 @@ func (s *Server) createTask(c *gin.Context) {
 		Payload:     payloadJSON,
 		Priority:    priorityInt,
 		MaxRetries:  req.MaxRetries,
+		Status:      task.StatusPending,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -233,6 +235,13 @@ func (s *Server) listTasks(c *gin.Context) {
 	statusStr := c.Query("status")
 	limitStr := c.DefaultQuery("limit", "10")
 	offsetStr := c.DefaultQuery("offset", "0")
+	sortBy := c.DefaultQuery("sort", "created_at") // Default sort by creation date
+	sortOrder := c.DefaultQuery("order", "desc")   // Default order is descending (newest first)
+
+	// Ignore "undefined" status
+	if statusStr == "undefined" {
+		statusStr = ""
+	}
 
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil {
@@ -246,15 +255,39 @@ func (s *Server) listTasks(c *gin.Context) {
 		return
 	}
 
+	// Validate sort parameters
+	validSortFields := map[string]bool{
+		"created_at": true,
+		"updated_at": true,
+		"status":     true,
+		"priority":   true,
+		"name":       true,
+	}
+
+	if !validSortFields[sortBy] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sort field"})
+		return
+	}
+
+	if sortOrder != "asc" && sortOrder != "desc" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sort order, must be 'asc' or 'desc'"})
+		return
+	}
+
 	var status task.Status
 	if statusStr != "" {
 		status = task.Status(statusStr)
 	}
 
-	tasks, err := s.controller.ListTasks(c.Request.Context(), status, limit, offset)
+	tasks, err := s.controller.ListTasks(c.Request.Context(), status, limit, offset, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Ensure tasks is never null
+	if tasks == nil {
+		tasks = []*task.Task{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -381,6 +414,7 @@ func (s *Server) getSystemMetrics(c *gin.Context) {
 	// Get tasks stats
 	tasksStats, err := s.controller.GetTasksStats(c.Request.Context())
 	if err != nil {
+		log.Printf("Error getting task stats: %v", err)
 		// If we can't get real stats, provide mock data for initial development
 		c.JSON(http.StatusOK, gin.H{
 			"total_tasks":            5,
@@ -395,9 +429,14 @@ func (s *Server) getSystemMetrics(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Task stats: total=%d, active=%d, completed=%d, failed=%d",
+		tasksStats.TotalTasks, tasksStats.ActiveTasks,
+		tasksStats.CompletedTasks, tasksStats.FailedTasks)
+
 	// Get worker metrics
 	workersStats, err := s.controller.GetWorkersStats(c.Request.Context())
 	if err != nil {
+		log.Printf("Error getting worker stats: %v", err)
 		// If we can't get real stats, use basic info
 		c.JSON(http.StatusOK, gin.H{
 			"total_tasks":            tasksStats.TotalTasks,
@@ -424,6 +463,7 @@ func (s *Server) getSystemMetrics(c *gin.Context) {
 		"system_uptime":          time.Since(s.controller.GetStartTime()).Seconds(),
 	}
 
+	log.Printf("Returning metrics: %+v", metrics)
 	c.JSON(http.StatusOK, metrics)
 }
 

@@ -5,15 +5,18 @@
         label: string;
         class?: string;
     }[] = [];
-    export let rows: any[] = [];
+    export let rows: any[] | null = [];
     export let loading: boolean = false;
 
     // Allow passing in custom cell renderers
     export let cellRenderers: Record<string, (value: any, row: any) => string | { html: string } | null> = {};
 
+    // Ensure rows is never null for rendering
+    $: safeRows = rows || [];
+
     // Helper function to determine if we're on the last row
     function isLastRow(index: number): boolean {
-        return index === rows.length - 1;
+        return index === safeRows.length - 1;
     }
 
     // Helper function to determine if we're on the first column
@@ -38,7 +41,7 @@
             <div class="flex justify-center py-6">
                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
             </div>
-        {:else if rows.length === 0}
+        {:else if safeRows.length === 0}
             <div class="px-6 py-4 text-sm text-gray-500 text-center">
                 No data available
             </div>
@@ -58,14 +61,14 @@
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
-                        {#each rows as row, rowIndex}
+                        {#each safeRows as row, rowIndex}
                             <tr>
                                 {#each columns as column, colIndex}
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 {column.class || ''} 
                                         {isLastRow(rowIndex) && isFirstColumn(colIndex) ? 'rounded-bl-lg' : ''} 
                                         {isLastRow(rowIndex) && isLastColumn(colIndex) ? 'rounded-br-lg' : ''}"
                                     >
-                                        {#if cellRenderers[column.key]}
+                                        {#if cellRenderers[column.key] && row[column.key] !== undefined}
                                             {@const rendered = cellRenderers[column.key](row[column.key], row)}
                                             {#if rendered && typeof rendered === 'object' && 'html' in rendered}
                                                 {@html rendered.html}
@@ -73,7 +76,7 @@
                                                 {rendered}
                                             {/if}
                                         {:else}
-                                            {row[column.key]}
+                                            {row[column.key] !== undefined ? row[column.key] : '-'}
                                         {/if}
                                     </td>
                                 {/each}

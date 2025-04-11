@@ -1,14 +1,19 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import { mount } from 'svelte';
     import { api } from '$lib/api';
     import type { Task, CreateTaskRequest } from '$lib/types';
     import TaskForm from '$lib/components/TaskForm.svelte';
     import Table from '$lib/components/Table.svelte';
+    import StatusBadge from '$lib/components/StatusBadge.svelte';
 
     let tasks: Task[] = [];
     let loading = true;
     let error: string | null = null;
+    let dataFetched = false;
     let showCreateForm = false;
+    let sortBy = 'created_at';
+    let sortOrder: 'asc' | 'desc' = 'desc';
     let newTask: CreateTaskRequest = {
         type: '',
         name: '',
@@ -38,19 +43,18 @@
         name: (value: string, row: Task) => ({
             html: `<a href="/tasks/${row.id}" class="text-indigo-600 hover:text-indigo-900">${value}</a>`
         }),
-        status: (value: string) => ({
-            html: `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
-                ${value === 'completed' ? 'bg-green-100 text-green-800' :
-                 value === 'running' ? 'bg-blue-100 text-blue-800' :
-                 value === 'failed' ? 'bg-red-100 text-red-800' :
-                 value === 'cancelled' ? 'bg-gray-100 text-gray-800' :
-                 'bg-yellow-100 text-yellow-800'}">
-                ${value}
-            </span>`
-        }),
-        created_at: (value: string) => new Date(value).toLocaleString(),
+        status: (value: string) => {
+            const statusHTML = document.createElement('div');
+            // Use mount instead of new for Svelte 5
+            mount(StatusBadge, {
+                target: statusHTML,
+                props: { status: value }
+            });
+            return { html: statusHTML.innerHTML };
+        },
+        created_at: (value: string) => value ? new Date(value).toLocaleString() : 'Unknown',
         actions: (_: any, row: Task) => {
-            if (row.status === 'pending' || row.status === 'running') {
+            if (row.status === 'pending' || row.status === 'running' || row.status === 'retrying' || row.status === 'scheduled') {
                 return {
                     html: `<button
                         data-task-id="${row.id}"
@@ -66,23 +70,58 @@
     async function loadTasks() {
         try {
             loading = true;
-            const response = await api.listTasks();
-            tasks = response.tasks;
+            const response = await api.listTasks(undefined, 10, 0, sortBy, sortOrder);
+            console.log('Tasks loaded:', response);
+            tasks = response.tasks || [];
+            dataFetched = true;
         } catch (e) {
+            console.error('Error loading tasks:', e);
             error = e instanceof Error ? e.message : 'Failed to load tasks';
+            dataFetched = true;
         } finally {
             loading = false;
         }
+    }
+
+    function changeSort(field: string) {
+        if (sortBy === field) {
+            // Toggle order if same field
+            sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+        } else {
+            // New field, default to descending
+            sortBy = field;
+            sortOrder = 'desc';
+        }
+        loadTasks();
     }
 
     async function createTask() {
         try {
             loading = true;
             formErrors = {};
-            await api.createTask(newTask);
+            const response = await api.createTask(newTask);
+            console.log('Task created:', response);
             showCreateForm = false;
+            
+            // Reset the form for next use
+            newTask = {
+                type: '',
+                name: '',
+                description: '',
+                priority: 'medium',
+                payload: {},
+                max_retries: 3,
+                timeout: 60,
+                schedule: {
+                    type: 'one-time',
+                    start_time: new Date().toISOString().slice(0, 16) 
+                }
+            };
+            
+            // Reload tasks
             await loadTasks();
         } catch (e) {
+            console.error('Error creating task:', e);
             if (e instanceof Error) {
                 error = e.message;
                 // Parse validation errors if they exist
@@ -128,12 +167,45 @@
 <div class="space-y-6">
     <div class="flex justify-between items-center">
         <h1 class="text-2xl font-semibold text-gray-900">Tasks</h1>
-        <button
-            on:click={() => showCreateForm = !showCreateForm}
-            class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-        >
-            {showCreateForm ? 'Cancel' : 'Create Task'}
-        </button>
+        <div class="flex space-x-2">
+            <button
+                on:click={loadTasks}
+                class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Refresh
+            </button>
+            <button
+                on:click={() => showCreateForm = !showCreateForm}
+                class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+                {showCreateForm ? 'Cancel' : 'Create Task'}
+            </button>
+        </div>
+    </div>
+
+    <div class="flex items-center space-x-4 mb-4">
+        <div class="text-sm font-medium text-gray-500">Sort by:</div>
+        <div class="flex space-x-2">
+            {#each [
+                { field: 'created_at', label: 'Created Date' },
+                { field: 'updated_at', label: 'Updated Date' },
+                { field: 'name', label: 'Name' },
+                { field: 'status', label: 'Status' }
+            ] as sortOption}
+                <button 
+                    class="px-3 py-1 text-sm border rounded-md {sortBy === sortOption.field ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'border-gray-200 text-gray-600'}"
+                    on:click={() => changeSort(sortOption.field)}
+                >
+                    {sortOption.label}
+                    {#if sortBy === sortOption.field}
+                        <span class="ml-1">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+                    {/if}
+                </button>
+            {/each}
+        </div>
     </div>
 
     {#if error}
@@ -179,7 +251,7 @@
             {columns}
             rows={tasks}
             {cellRenderers}
-            loading={loading && !showCreateForm}
+            loading={loading && (!dataFetched || showCreateForm)}
         />
     </div>
 </div> 

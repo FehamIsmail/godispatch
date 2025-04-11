@@ -1,13 +1,16 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import { mount } from 'svelte';
     import { api } from '$lib/api';
     import type { SystemMetrics, Task } from '$lib/types';
     import Table from '$lib/components/Table.svelte';
+    import StatusBadge from '$lib/components/StatusBadge.svelte';
 
     let metrics: SystemMetrics | null = null;
     let recentTasks: Task[] = [];
     let loading = true;
     let error: string | null = null;
+    let dataFetched = false;
 
     // Define table columns for recent tasks
     const taskColumns = [
@@ -22,16 +25,15 @@
         name: (value: string, row: Task) => ({
             html: `<a href="/tasks/${row.id}" class="text-indigo-600 hover:text-indigo-900">${value}</a>`
         }),
-        status: (value: string) => ({
-            html: `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
-                ${value === 'completed' ? 'bg-green-100 text-green-800' :
-                 value === 'running' ? 'bg-blue-100 text-blue-800' :
-                 value === 'failed' ? 'bg-red-100 text-red-800' :
-                 value === 'cancelled' ? 'bg-gray-100 text-gray-800' :
-                 'bg-yellow-100 text-yellow-800'}">
-                ${value}
-            </span>`
-        }),
+        status: (value: string) => {
+            const statusHTML = document.createElement('div');
+            // Use mount instead of new for Svelte 5
+            mount(StatusBadge, {
+                target: statusHTML,
+                props: { status: value }
+            });
+            return { html: statusHTML.innerHTML };
+        },
         created_at: (value: string) => new Date(value).toLocaleString()
     };
 
@@ -44,8 +46,10 @@
             ]);
             metrics = metricsResponse;
             recentTasks = tasksResponse.tasks;
+            dataFetched = true;
         } catch (e) {
             error = e instanceof Error ? e.message : 'Failed to load dashboard data';
+            dataFetched = true;
         } finally {
             loading = false;
         }
@@ -76,84 +80,99 @@
         </div>
     {/if}
 
-    {#if loading && !metrics}
+    {#if loading && !dataFetched}
         <div class="flex justify-center">
             <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
         </div>
-    {:else if metrics}
-        <div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            <div class="bg-white overflow-hidden shadow rounded-lg">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">
-                            <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                            </svg>
-                        </div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-gray-500 truncate">Total Tasks</dt>
-                                <dd class="text-lg font-semibold text-gray-900">{metrics.total_tasks}</dd>
-                            </dl>
+    {:else}
+        {#if metrics}
+            <div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0">
+                                <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                </svg>
+                            </div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-gray-500 truncate">Total Tasks</dt>
+                                    <dd class="text-lg font-semibold text-gray-900">{metrics.total_tasks}</dd>
+                                </dl>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="bg-white overflow-hidden shadow rounded-lg">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">
-                            <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                            </svg>
-                        </div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-gray-500 truncate">Active Tasks</dt>
-                                <dd class="text-lg font-semibold text-gray-900">{metrics.active_tasks}</dd>
-                            </dl>
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0">
+                                <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                </svg>
+                            </div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-gray-500 truncate">Active Tasks</dt>
+                                    <dd class="text-lg font-semibold text-gray-900">{metrics.active_tasks}</dd>
+                                </dl>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="bg-white overflow-hidden shadow rounded-lg">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">
-                            <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                        </div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-gray-500 truncate">Completed Tasks</dt>
-                                <dd class="text-lg font-semibold text-gray-900">{metrics.completed_tasks}</dd>
-                            </dl>
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0">
+                                <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-gray-500 truncate">Completed Tasks</dt>
+                                    <dd class="text-lg font-semibold text-gray-900">{metrics.completed_tasks}</dd>
+                                </dl>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="bg-white overflow-hidden shadow rounded-lg">
-                <div class="p-5">
-                    <div class="flex items-center">
-                        <div class="flex-shrink-0">
-                            <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                        </div>
-                        <div class="ml-5 w-0 flex-1">
-                            <dl>
-                                <dt class="text-sm font-medium text-gray-500 truncate">Avg. Execution Time</dt>
-                                <dd class="text-lg font-semibold text-gray-900">{metrics.average_execution_time.toFixed(2)}s</dd>
-                            </dl>
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="p-5">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0">
+                                <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div class="ml-5 w-0 flex-1">
+                                <dl>
+                                    <dt class="text-sm font-medium text-gray-500 truncate">Avg. Execution Time</dt>
+                                    <dd class="text-lg font-semibold text-gray-900">{metrics.average_execution_time.toFixed(2)}s</dd>
+                                </dl>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        {:else if dataFetched}
+            <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4">
+                <div class="flex">
+                    <div class="flex-shrink-0">
+                        <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <div class="ml-3">
+                        <p class="text-sm text-yellow-700">No metrics data available.</p>
+                    </div>
+                </div>
+            </div>
+        {/if}
 
         <Table
             title="Recent Tasks"

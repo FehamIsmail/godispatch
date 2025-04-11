@@ -184,3 +184,10 @@ func getCPUTime() float64 {
 	// or a library like gopsutil to get actual CPU usage
 	return float64(time.Now().UnixNano())
 }
+
+// GetActiveTaskCount returns the current number of active tasks
+func (m *MetricsCollector) GetActiveTaskCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.activeTasks)
+}
