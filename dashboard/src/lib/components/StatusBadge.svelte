@@ -1,7 +1,7 @@
 <script lang="ts">
     export let status: string;
     
-    // Define color mappings for different statuses
+    // Color mappings for task status
     const getStatusColors = (status: string): string => {
         switch (status.toLowerCase()) {
             case 'completed':
@@ -25,7 +25,7 @@
         }
     };
 
-    // Format status for display (capitalize first letter)
+    // Capitalize first letter
     const formatStatus = (status: string): string => {
         return status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
     };

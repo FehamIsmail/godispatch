@@ -27,7 +27,6 @@
         }),
         status: (value: string) => {
             const statusHTML = document.createElement('div');
-            // Use mount instead of new for Svelte 5
             mount(StatusBadge, {
                 target: statusHTML,
                 props: { status: value }

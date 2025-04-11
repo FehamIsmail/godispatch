@@ -1,7 +1,7 @@
 <script lang="ts">
     export let status: string;
     
-    // Define color mappings for different statuses
+    // Background colors for timeline status icons
     const getStatusColor = (status: string): string => {
         switch (status.toLowerCase()) {
             case 'completed':

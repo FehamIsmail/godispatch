@@ -12,25 +12,24 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
             },
         });
 
-        // Handle non-OK responses
+        // Handle errors from API
         if (!response.ok) {
             const errorText = await response.text();
             let errorMessage = `API error (${response.status}): ${response.statusText}`;
             
-            // Try to parse error as JSON for more details
             try {
                 const errorJson = JSON.parse(errorText);
                 errorMessage = errorJson.error || errorMessage;
                 throw new Error(errorJson.error ? JSON.stringify(errorJson) : errorMessage);
             } catch (parseError) {
-                // If not valid JSON, use the raw error text
+                // Raw error text if not JSON
                 throw new Error(errorText || errorMessage);
             }
         }
 
         return response.json();
     } catch (error) {
-        // Handle network errors or other fetch problems
+        // Log and rethrow errors
         if (error instanceof Error) {
             console.error(`Fetch error for ${endpoint}:`, error);
             throw error;
@@ -39,25 +38,25 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
     }
 }
 
-// Helper function to transform backend result to frontend format
+// Convert backend result to frontend format
 function transformTaskResult(result: any): TaskResult {
     return {
         task_id: result.task_id,
         status: result.status,
         output: result.output,
         error: result.error || null,
-        started_at: result.start_time,  // Map backend start_time to frontend started_at
-        completed_at: result.end_time,  // Map backend end_time to frontend completed_at
+        started_at: result.start_time,
+        completed_at: result.end_time,
     };
 }
 
-// Helper function to transform backend history to frontend format
+// Format history items for UI
 function transformTaskHistory(results: any[]): TaskHistory[] {
     return results.map(result => ({
         task_id: result.task_id,
         status: result.status,
-        timestamp: result.start_time,  // Use start_time as timestamp
-        message: result.error || `Task ${result.status} by worker ${result.worker_id}` // Create a message from available data
+        timestamp: result.start_time,
+        message: result.error || `Task ${result.status} by worker ${result.worker_id}`
     }));
 }
 
