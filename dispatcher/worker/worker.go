@@ -37,7 +37,7 @@ func NewWorker(cfg *config.WorkerConfig, redisClient *redis.Client) *Worker {
 		redisClient: redisClient,
 		config:      cfg,
 		stopCh:      make(chan struct{}),
-		taskTypes:   []string{"default", "*"}, // Default task type and wildcard
+		taskTypes:   []string{"*"}, // Use wildcard to handle all task types
 		metrics:     NewMetricsCollector(),
 	}
 }
@@ -59,6 +59,9 @@ func (w *Worker) RegisterTaskType(taskType string) {
 // Start starts the worker
 func (w *Worker) Start(ctx context.Context) error {
 	w.wg.Add(w.config.Count)
+
+	// Ensure important system queues exist
+	w.ensureSystemQueues(ctx)
 
 	// Start worker pool
 	for i := 0; i < w.config.Count; i++ {
@@ -83,6 +86,48 @@ func (w *Worker) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// ensureSystemQueues creates important system queues if they don't exist
+func (w *Worker) ensureSystemQueues(ctx context.Context) {
+	// List of important system queues
+	systemQueues := []string{
+		"queue:tasks:all_pending",
+		"queue:tasks:default",
+	}
+
+	for _, queueKey := range systemQueues {
+		exists, err := w.redisClient.Exists(ctx, queueKey).Result()
+		if err != nil {
+			log.Printf("Error checking if queue %s exists: %v", queueKey, err)
+			continue
+		}
+
+		if exists == 0 {
+			// For sorted sets, we need to add a member, but we'll just add a dummy one that we can remove
+			dummyMember := map[string]interface{}{
+				"id":         "dummy",
+				"type":       "dummy",
+				"name":       "System Initialization",
+				"status":     "completed",
+				"created_at": time.Now().UTC(),
+			}
+			dummyJSON, _ := json.Marshal(dummyMember)
+
+			// Add dummy member to initialize the queue
+			err = w.redisClient.ZAdd(ctx, queueKey, &redis.Z{
+				Score:  0,
+				Member: string(dummyJSON),
+			}).Err()
+
+			if err != nil {
+				log.Printf("Error initializing queue %s: %v", queueKey, err)
+			} else {
+				// Remove the dummy member now that the queue exists
+				w.redisClient.ZRem(ctx, queueKey, string(dummyJSON))
+			}
+		}
+	}
 }
 
 // Stop stops the worker
@@ -132,9 +177,12 @@ func (w *Worker) updateHeartbeat(ctx context.Context) {
 	key := fmt.Sprintf("heartbeat:worker:%s", w.id)
 	ttl := 30 * time.Second
 
+	// Only log heartbeats once every 5 minutes (300 seconds)
+	logHeartbeat := time.Now().Unix()%300 == 0
+
 	if err := w.redisClient.Set(ctx, key, time.Now().Unix(), ttl).Err(); err != nil {
 		log.Printf("Failed to update worker heartbeat: %v", err)
-	} else {
+	} else if logHeartbeat {
 		log.Printf("Updated worker heartbeat: %s", w.id)
 	}
 
@@ -169,7 +217,7 @@ func (w *Worker) updateHeartbeat(ctx context.Context) {
 
 	if err := w.redisClient.HMSet(ctx, workerKey, info).Err(); err != nil {
 		log.Printf("Failed to update worker info: %v", err)
-	} else {
+	} else if logHeartbeat {
 		log.Printf("Updated worker status to %s", status)
 	}
 }
@@ -241,6 +289,40 @@ func (w *Worker) scanForTaskTypes(ctx context.Context) ([]string, error) {
 	return taskTypes, nil
 }
 
+// scanForTaskQueues scans Redis for all available task queues
+func (w *Worker) scanForTaskQueues(ctx context.Context) ([]string, error) {
+	var taskTypes []string
+	var cursor uint64
+	var err error
+	var keys []string
+
+	// Scan for all task queues
+	for {
+		keys, cursor, err = w.redisClient.Scan(ctx, cursor, "queue:tasks:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+
+		// Extract task types from queue keys
+		for _, key := range keys {
+			if len(key) <= 12 {
+				continue // Skip keys that are too short (can't extract type)
+			}
+			taskType := key[12:] // Remove "queue:tasks:" prefix
+			if taskType != "" && taskType != "all_pending" {
+				// Don't include special queues like all_pending
+				taskTypes = append(taskTypes, taskType)
+			}
+		}
+
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return taskTypes, nil
+}
+
 // fetchAndProcessTask fetches a task from the queue and processes it
 func (w *Worker) fetchAndProcessTask(ctx context.Context) error {
 	w.mu.Lock()
@@ -248,9 +330,54 @@ func (w *Worker) fetchAndProcessTask(ctx context.Context) error {
 	copy(taskTypes, w.taskTypes)
 	w.mu.Unlock()
 
+	// Check if the worker handles the wildcard type
+	handlesWildcard := false
+	for _, taskType := range taskTypes {
+		if taskType == "*" {
+			handlesWildcard = true
+			break
+		}
+	}
+
+	// If worker handles wildcard, get all available task queues
+	if handlesWildcard {
+		allTaskTypes, err := w.scanForTaskQueues(ctx)
+		if err != nil {
+			// Only log actual errors, not just empty queues
+			if err != redis.Nil {
+				log.Printf("Error scanning for task queues: %v", err)
+			}
+		} else if len(allTaskTypes) > 0 {
+			// Add all discovered task types to our list if they're not already there
+			for _, discoveredType := range allTaskTypes {
+				found := false
+				for _, existingType := range taskTypes {
+					if existingType == discoveredType {
+						found = true
+						break
+					}
+				}
+				if !found {
+					taskTypes = append(taskTypes, discoveredType)
+				}
+			}
+		}
+	}
+
 	// Try to fetch a task from any of the registered queues
 	for _, taskType := range taskTypes {
 		queueKey := fmt.Sprintf("queue:tasks:%s", taskType)
+
+		// Check if queue exists
+		exists, err := w.redisClient.Exists(ctx, queueKey).Result()
+		if err != nil {
+			log.Printf("Error checking if queue %s exists: %v", queueKey, err)
+			continue
+		}
+		if exists == 0 {
+			// Skip non-existent queues silently
+			continue
+		}
 
 		// Get the highest priority task
 		result := w.redisClient.ZRevRange(ctx, queueKey, 0, 0)
@@ -276,11 +403,13 @@ func (w *Worker) fetchAndProcessTask(ctx context.Context) error {
 					continue
 				}
 
-				for _, pendingTask := range pendingTasks {
-					// Process each pending task
-					w.activeJobs.Add(1)
-					go w.processTask(ctx, pendingTask)
-					return nil
+				if len(pendingTasks) > 0 {
+					for _, pendingTask := range pendingTasks {
+						// Process each pending task
+						w.activeJobs.Add(1)
+						go w.processTask(ctx, pendingTask)
+						return nil
+					}
 				}
 			}
 			continue // No tasks in this queue
@@ -296,8 +425,8 @@ func (w *Worker) fetchAndProcessTask(ctx context.Context) error {
 		}
 
 		if removed.Val() == 0 {
-			log.Printf("Task was already claimed by another worker from queue %s", queueKey)
-			continue // Task was already claimed by another worker
+			// Task was already claimed by another worker
+			continue
 		}
 
 		// Parse the task
@@ -307,7 +436,7 @@ func (w *Worker) fetchAndProcessTask(ctx context.Context) error {
 			continue
 		}
 
-		log.Printf("Worker %s claimed task %s of type %s from queue %s", w.id, task.ID, task.Type, queueKey)
+		log.Printf("Worker %s claimed task %s of type %s", w.id, task.ID, task.Type)
 
 		// Process the task in a separate goroutine
 		w.activeJobs.Add(1)
@@ -368,7 +497,6 @@ func (w *Worker) findPendingTasks(ctx context.Context) ([]*task.Task, error) {
 				if !inQueue {
 					// If not in queue, add it to our list to process
 					pendingTasks = append(pendingTasks, t)
-					log.Printf("Found pending task %s not in any queue", t.ID)
 				}
 			}
 		}
@@ -383,8 +511,6 @@ func (w *Worker) findPendingTasks(ctx context.Context) ([]*task.Task, error) {
 
 // isTaskInQueue checks if a task is in any queue
 func (w *Worker) isTaskInQueue(ctx context.Context, t *task.Task) (bool, error) {
-	queueKey := fmt.Sprintf("queue:tasks:%s", t.Type)
-
 	// Convert task to JSON for comparison
 	taskJSON, err := t.ToJSON()
 	if err != nil {
@@ -392,7 +518,19 @@ func (w *Worker) isTaskInQueue(ctx context.Context, t *task.Task) (bool, error) 
 	}
 
 	// Check if task is in its type-specific queue
-	count, err := w.redisClient.ZScore(ctx, queueKey, string(taskJSON)).Result()
+	typeQueueKey := fmt.Sprintf("queue:tasks:%s", t.Type)
+	count, err := w.redisClient.ZScore(ctx, typeQueueKey, string(taskJSON)).Result()
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+
+	if count > 0 {
+		return true, nil
+	}
+
+	// Also check the all_pending backup queue
+	backupQueueKey := "queue:tasks:all_pending"
+	count, err = w.redisClient.ZScore(ctx, backupQueueKey, string(taskJSON)).Result()
 	if err != nil && err != redis.Nil {
 		return false, err
 	}

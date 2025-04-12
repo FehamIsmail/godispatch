@@ -252,11 +252,15 @@ func (c *Controller) CancelTask(ctx context.Context, taskID string) error {
 
 // ListTasks lists tasks with optional filters
 func (c *Controller) ListTasks(ctx context.Context, status task.Status, limit, offset int, sortBy string, sortOrder string) ([]*task.Task, error) {
-	// Get all task keys (improvement: use SCAN for large datasets)
 	pattern := "task:*"
 	keys, err := c.redisClient.Keys(ctx, pattern).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks: %w", err)
+	}
+
+	// If no keys found, return empty result
+	if len(keys) == 0 {
+		return []*task.Task{}, nil
 	}
 
 	// Use Redis MGET to get multiple tasks at once
