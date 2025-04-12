@@ -122,50 +122,34 @@ npm run build
 npm run preview
 ```
 
-## API Usage
+## Web UI screenshots
+
+### Dashboard overview
+
+![Screenshot 2025-04-11 220913](https://github.com/user-attachments/assets/6d7cc499-8094-4f47-9c3b-0de1c6deaf0a)
 
 ### Creating a Task
 
-```bash
-curl -X POST http://localhost:8080/api/v1/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "email",
-    "name": "Send welcome email",
-    "description": "Send a welcome email to new users",
-    "priority": "high",
-    "payload": {
-      "to": "user@example.com",
-      "subject": "Welcome!",
-      "body": "Welcome to our service!"
-    },
-    "max_retries": 3,
-    "timeout": 60,
-    "schedule": {
-      "type": "one-time",
-      "start_time": "2023-04-10T15:00:00Z"
-    }
-  }'
-```
+![Screenshot 2025-04-11 220111](https://github.com/user-attachments/assets/6c22a1d5-dfe4-4d72-bddc-4ebc01940f13)
 
-### Getting Task Status
+### Listing all tasks
 
-```bash
-curl http://localhost:8080/api/v1/tasks/{task_id}
-```
+![Screenshot 2025-04-11 220119](https://github.com/user-attachments/assets/e2634190-0029-4ced-89c2-61ca70e84ec0)
 
-### Getting Task Result
+### Task status update `pending` -> `running`
 
-```bash
-curl http://localhost:8080/api/v1/tasks/{task_id}/result
-```
+![Screenshot 2025-04-11 220125](https://github.com/user-attachments/assets/00eaff42-8807-4956-af11-b4c5f443f74c)
 
-### Canceling a Task
+### Task status update `running` -> `completed`
 
-```bash
-curl -X DELETE http://localhost:8080/api/v1/tasks/{task_id}
-```
+![Screenshot 2025-04-11 220223](https://github.com/user-attachments/assets/e271f1d3-2816-462b-a291-009aa3da35db)
 
-## License
+### Getting task detail information
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+![Screenshot 2025-04-11 220239](https://github.com/user-attachments/assets/164f0e88-8e85-4b10-88c1-3d1e76ca8937)
+
+### System overview (workers list)
+
+![Screenshot 2025-04-11 220312](https://github.com/user-attachments/assets/896e4dc0-77ea-4100-be3c-aef4cee1bc46)
+
+
